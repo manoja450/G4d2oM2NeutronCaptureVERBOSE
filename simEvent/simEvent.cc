@@ -1,4 +1,3 @@
-
 #include "simEvent.h"
 #include "TClonesArray.h"
 #include "G4d2oGeom.h"
@@ -11,7 +10,7 @@ using namespace std;
 
 ClassImp(simEvent)
 
-    TClonesArray *simEvent::sPMTHits = 0;
+TClonesArray *simEvent::sPMTHits = 0;
 TClonesArray *simEvent::sAreaPMTHits = 0;
 
 simEvent::simEvent(Int_t maxPMT)
@@ -31,28 +30,97 @@ simEvent::simEvent(Int_t maxPMT)
 
 simEvent::~simEvent()
 {
-
   pmtHits->Clear("C");
   areaPMTHits->Clear("C");
 }
 
-void simEvent::AddPMTHit(Int_t pNum, Double_t eTime, Double_t phEn)
+void simEvent::AddPMTHit(Int_t pNum, Double_t eTime, Double_t phEn, Int_t pType)
 {
-
   simHit *theHit = (simHit *)pmtHits->ConstructedAt(numHits++);
-  theHit->Set(pNum, eTime, phEn);
+  theHit->Set(pNum, eTime, phEn, pType);
 }
 
 void simEvent::AddAreaPMTHit(Int_t pNum, Double_t eTime, Double_t phEn, TVector3 hitPos)
 {
-
   simAreaHit *theHit = (simAreaHit *)areaPMTHits->ConstructedAt(numHitsArea++);
-  theHit->Set(pNum, eTime, phEn, hitPos);
+  theHit->Set(pNum, eTime, phEn, hitPos, 0);
+}
+
+// ============================================================
+// ALL PARTICLES METHODS
+// ============================================================
+void simEvent::AddAllParticle(int trackID, int pdg, int parentID, int procID,
+                              double energy, double posX, double posY, double posZ,
+                              double time, const std::string& name)
+{
+    allParticleTrackID.push_back(trackID);
+    allParticlePDG.push_back(pdg);
+    allParticleParentID.push_back(parentID);
+    allParticleProcessID.push_back(procID);
+    allParticleEnergy.push_back(energy);
+    allParticlePosX.push_back(posX);
+    allParticlePosY.push_back(posY);
+    allParticlePosZ.push_back(posZ);
+    allParticleTime.push_back(time);
+    allParticleName.push_back(name);
+}
+
+void simEvent::ClearAllParticles()
+{
+    allParticleTrackID.clear();
+    allParticlePDG.clear();
+    allParticleParentID.clear();
+    allParticleProcessID.clear();
+    allParticleEnergy.clear();
+    allParticlePosX.clear();
+    allParticlePosY.clear();
+    allParticlePosZ.clear();
+    allParticleTime.clear();
+    allParticleName.clear();
+}
+
+// ============================================================
+// STEP POINT METHODS
+// ============================================================
+void simEvent::AddStepPoint(int trackID, int stepNumber, int volumeCopy, int processID,
+                            int pdg, int parentID, double posX, double posY, double posZ,
+                            double kineticEnergy, double energyDeposit,
+                            double globalTime, double stepLength)
+{
+    stepPointTrackID.push_back(trackID);
+    stepPointStepNumber.push_back(stepNumber);
+    stepPointVolumeCopy.push_back(volumeCopy);
+    stepPointProcessID.push_back(processID);
+    stepPointPDG.push_back(pdg);
+    stepPointParentID.push_back(parentID);
+    stepPointPosX.push_back(posX);
+    stepPointPosY.push_back(posY);
+    stepPointPosZ.push_back(posZ);
+    stepPointKineticEnergy.push_back(kineticEnergy);
+    stepPointEnergyDeposit.push_back(energyDeposit);
+    stepPointGlobalTime.push_back(globalTime);
+    stepPointStepLength.push_back(stepLength);
+}
+
+void simEvent::ClearStepData()
+{
+    stepPointTrackID.clear();
+    stepPointStepNumber.clear();
+    stepPointVolumeCopy.clear();
+    stepPointProcessID.clear();
+    stepPointPDG.clear();
+    stepPointParentID.clear();
+    stepPointPosX.clear();
+    stepPointPosY.clear();
+    stepPointPosZ.clear();
+    stepPointKineticEnergy.clear();
+    stepPointEnergyDeposit.clear();
+    stepPointGlobalTime.clear();
+    stepPointStepLength.clear();
 }
 
 void simEvent::ClearData()
 {
-
   eventNumber = -1;
   direction0.SetXYZ(0.0, 0.0, 0.0);
   position0.SetXYZ(0.0, 0.0, 0.0);
@@ -70,11 +138,33 @@ void simEvent::ClearData()
   areaPMTHits->Clear();
   for (int i = 0; i < 12; i++)
     muVetoEnergy[i] = 0.0;
+
+  // ============================================================
+  // Clear neutron capture information
+  // ============================================================
+  neutronCaptured = false;
+  neutronCaptureOnHydrogen = false;
+  neutronCaptureOnDeuterium = false;
+  neutronCaptureTime = 0.0;
+  neutronCaptureGammaEnergy = 0.0;
+  neutronCaptureDelay = 0.0;
+  neutronCaptureVolume = "";
+  neutronCaptureNHits = 0;
+  neutronCapturePosX = 0.0;
+  neutronCapturePosY = 0.0;
+  neutronCapturePosZ = 0.0;
+  neutronCaptureProductEnergy = 0.0;
+  neutronCaptureProduct = "";
+
+  // Clear all particles data
+  ClearAllParticles();
+  
+  // Clear step point data
+  ClearStepData();
 }
 
 void simEvent::CopyData(simEvent *dataToCopy)
 {
-
   eventNumber = dataToCopy->eventNumber;
   direction0 = TVector3(dataToCopy->direction0);
   position0 = TVector3(dataToCopy->position0);
@@ -88,6 +178,48 @@ void simEvent::CopyData(simEvent *dataToCopy)
   areaPMTHits = (TClonesArray *)dataToCopy->areaPMTHits->Clone();
   for (int i = 0; i < 12; i++)
     muVetoEnergy[i] = dataToCopy->muVetoEnergy[i];
+    
+  // Copy neutron capture information
+  neutronCaptured = dataToCopy->neutronCaptured;
+  neutronCaptureOnHydrogen = dataToCopy->neutronCaptureOnHydrogen;
+  neutronCaptureOnDeuterium = dataToCopy->neutronCaptureOnDeuterium;
+  neutronCaptureTime = dataToCopy->neutronCaptureTime;
+  neutronCaptureGammaEnergy = dataToCopy->neutronCaptureGammaEnergy;
+  neutronCaptureDelay = dataToCopy->neutronCaptureDelay;
+  neutronCaptureVolume = dataToCopy->neutronCaptureVolume;
+  neutronCaptureNHits = dataToCopy->neutronCaptureNHits;
+  neutronCapturePosX = dataToCopy->neutronCapturePosX;
+  neutronCapturePosY = dataToCopy->neutronCapturePosY;
+  neutronCapturePosZ = dataToCopy->neutronCapturePosZ;
+  neutronCaptureProductEnergy = dataToCopy->neutronCaptureProductEnergy;
+  neutronCaptureProduct = dataToCopy->neutronCaptureProduct;
+  
+  // Copy all particles data
+  allParticleTrackID = dataToCopy->allParticleTrackID;
+  allParticlePDG = dataToCopy->allParticlePDG;
+  allParticleParentID = dataToCopy->allParticleParentID;
+  allParticleProcessID = dataToCopy->allParticleProcessID;
+  allParticleEnergy = dataToCopy->allParticleEnergy;
+  allParticlePosX = dataToCopy->allParticlePosX;
+  allParticlePosY = dataToCopy->allParticlePosY;
+  allParticlePosZ = dataToCopy->allParticlePosZ;
+  allParticleTime = dataToCopy->allParticleTime;
+  allParticleName = dataToCopy->allParticleName;
+  
+  // Copy step point data
+  stepPointTrackID = dataToCopy->stepPointTrackID;
+  stepPointStepNumber = dataToCopy->stepPointStepNumber;
+  stepPointVolumeCopy = dataToCopy->stepPointVolumeCopy;
+  stepPointProcessID = dataToCopy->stepPointProcessID;
+  stepPointPDG = dataToCopy->stepPointPDG;
+  stepPointParentID = dataToCopy->stepPointParentID;
+  stepPointPosX = dataToCopy->stepPointPosX;
+  stepPointPosY = dataToCopy->stepPointPosY;
+  stepPointPosZ = dataToCopy->stepPointPosZ;
+  stepPointKineticEnergy = dataToCopy->stepPointKineticEnergy;
+  stepPointEnergyDeposit = dataToCopy->stepPointEnergyDeposit;
+  stepPointGlobalTime = dataToCopy->stepPointGlobalTime;
+  stepPointStepLength = dataToCopy->stepPointStepLength;
 }
 
 double simEvent::MeanX() const

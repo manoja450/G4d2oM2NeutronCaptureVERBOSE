@@ -681,12 +681,15 @@ G4LogicalVolume *G4d2oCylindricalDetector::GetWideVetoLogV(){
     
 }
 
+// ============================================================
+// MODIFIED GetH2OLogV - BOTH VOLUMES NOW D2O
+// ============================================================
 G4LogicalVolume *G4d2oCylindricalDetector::GetH2OLogV(){
 
     G4Tubs* h2oSolid = new G4Tubs("h2oSolid",0.0,(h2oLength)/2.0,(h2oHeight-0.5*pmtLegLength-0.5*pmtMinorAxis)/2.0,0.0,360.0*deg);
     
     G4LogicalVolume *h2oLogV = new G4LogicalVolume(h2oSolid,
-                                                   matPtr->GetMaterial( H2O ),
+                                                   matPtr->GetMaterial( D2O ),  // ← CHANGED: H2O to D2O
                                                    "h2oLogV");
     
     G4VisAttributes *visLightWater = new G4VisAttributes();
@@ -716,15 +719,13 @@ G4LogicalVolume *G4d2oCylindricalDetector::GetAcrylicLogV(){
 }
 
 // ============================================================
-// GET D2O LOGICAL VOLUME - MODULE1 (D2O inner, H2O outer)
-// CHANGED: Material from H2O to D2O for MODULE1
+// GET D2O LOGICAL VOLUME - Also D2O
 // ============================================================
-
 G4LogicalVolume *G4d2oCylindricalDetector::GetD2OLogV(){
     
     G4Tubs* d2oSolid = new G4Tubs("d2oSolid",0.0,d2oLength/2.0,d2oHeight/2.0,0.0,360.0*deg);
     G4LogicalVolume *d2oLogV = new G4LogicalVolume(d2oSolid,
-                                                   matPtr->GetMaterial( D2O ),  // ← CHANGED: H2O to D2O for MODULE1
+                                                   matPtr->GetMaterial( D2O ),
                                                    "d2oLogV");
     G4VisAttributes *visAttD2O = new G4VisAttributes();
     visAttD2O->SetColour(G4Colour(0.0, 0.6, 1.0));
@@ -1173,4 +1174,3 @@ void G4d2oCylindricalDetector::PlacePMTs(G4LogicalVolume *thePMTLogV, G4LogicalV
     std::cout << "\n offset = \n\n";
 
 }
-

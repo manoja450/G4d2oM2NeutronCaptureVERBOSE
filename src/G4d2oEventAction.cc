@@ -1,10 +1,13 @@
-
 #include "G4d2oEventAction.hh"
 #include "G4d2oDetectorHit.hh"
 #include "G4d2oNeutrinoAlley.hh"
 #include "G4d2oSensitiveDetector.hh"
 #include "G4d2oDetector.hh"
 #include "G4d2oRunAction.hh"
+#include "G4d2oNeutronGun.hh"
+#include "G4d2oPrimaryGeneratorAction.hh"
+#include "G4d2oStepRecorder.hh"
+#include "TrackInfoManager.hh"
 #include "G4Navigator.hh"
 #include "G4TransportationManager.hh"
 
@@ -19,11 +22,150 @@
 #include "TClassTable.h"
 #include "inputVariables.hh"
 
+#include <fstream>
+#include <iomanip>
+
+// ============================================================
+// VERBOSE OUTPUT FILE
+// ============================================================
+static std::ofstream gVerboseLog;
+static int gVerboseEventCount = 0;
+static const int MAX_VERBOSE_EVENTS = 50;
+
+// ============================================================
+// Helper function to get parent type from track info
+// ============================================================
+int GetParentTypeFromTrackInfo(const TrackInfo& info, const TrackInfoManager* trackMgr) {
+    // Parent type classification:
+    // 1 = Muon
+    // 2 = Michel e⁻ (muon decay)
+    // 3 = EM Shower e⁻ (Compton, Photo, Pair)
+    // 4 = Unclassified
+    // 5 = Neutron Capture γ
+    // 6 = EM Shower γ (Bremsstrahlung)
+    // 7 = Delta Ray (Ionization e⁻)
+    // 8 = Primary e⁻ (Beam)
+    // 9 = Radioactive Decay
+    // 10 = Neutron Inelastic
+    // 11 = Cosmic Ray γ
+
+    if (info.parentID == 0) {
+        return 8; // Primary beam
+    }
+
+    const TrackInfo* parentInfo = trackMgr->GetTrackInfo(info.parentID);
+    if (!parentInfo) {
+        return 4; // Unclassified
+    }
+
+    if (parentInfo->parentType != 0) {
+        return parentInfo->parentType;
+    }
+
+    int parentPDG = std::abs(parentInfo->pdg);
+    G4String creatorProc = parentInfo->creatorProcess;
+    G4String parentName = parentInfo->particleName;
+
+    if (parentPDG == 22) {
+        if (creatorProc == "nCapture" || creatorProc == "neutronCapture") {
+            return 5;
+        }
+        if (creatorProc == "brems" || creatorProc == "Brem" ||
+            creatorProc == "eBrem" || creatorProc == "muBrem") {
+            return 6;
+        }
+        if (creatorProc == "Primary") {
+            return 11;
+        }
+        return 6;
+    }
+
+    if (parentPDG == 11 || parentPDG == -11) {
+        if (creatorProc == "muDecay" || creatorProc == "Decay") {
+            return 2;
+        }
+        if (creatorProc == "eIoni" || creatorProc == "mIoni" ||
+            creatorProc == "hIoni" || creatorProc == "muIoni" ||
+            creatorProc == "Ionization") {
+            return 7;
+        }
+        if (creatorProc == "compt" || creatorProc == "phot" ||
+            creatorProc == "pair" || creatorProc == "conv") {
+            return 3;
+        }
+        if (creatorProc == "Primary") {
+            return 8;
+        }
+        if (creatorProc == "RadioactiveDecay") {
+            return 9;
+        }
+        return 3;
+    }
+
+    if (parentPDG == 13 || parentPDG == -13) {
+        return 1;
+    }
+
+    if (parentPDG == 2112) {
+        if (creatorProc == "nInelastic" || creatorProc == "neutronInelastic") {
+            return 10;
+        }
+        return 4;
+    }
+
+    if (parentPDG == 2212) {
+        return 4;
+    }
+
+    return 4;
+}
+
+void PropagateParentType(TrackInfoManager* trackMgr) {
+    const auto& allTracks = trackMgr->GetAllTracks();
+    
+    std::vector<int> trackIDs;
+    for (const auto& pair : allTracks) {
+        trackIDs.push_back(pair.first);
+    }
+    std::sort(trackIDs.begin(), trackIDs.end());
+    
+    for (int trackID : trackIDs) {
+        TrackInfo* info = trackMgr->GetTrackInfoPtr(trackID);
+        if (!info) continue;
+        if (info->parentType != 0) continue;
+        
+        info->parentType = GetParentTypeFromTrackInfo(*info, trackMgr);
+        
+        if (info->pdg == 22 && (info->creatorProcess == "nCapture" || 
+                                 info->creatorProcess == "neutronCapture")) {
+            info->parentType = 5;
+        }
+    }
+    
+    for (int trackID : trackIDs) {
+        TrackInfo* info = trackMgr->GetTrackInfoPtr(trackID);
+        if (!info) continue;
+        
+        if (info->parentID != 0) {
+            const TrackInfo* parentInfo = trackMgr->GetTrackInfo(info->parentID);
+            if (parentInfo && parentInfo->parentType == 5) {
+                info->parentType = 5;
+            }
+        }
+    }
+}
+
 G4d2oEventAction::G4d2oEventAction(void)
 {
     G4cerr << "\tConstructing G4d2oEventAction...";
 
-    // Initialize pointers
+    // Open verbose log file
+    gVerboseLog.open("simulation_verbose.log", std::ios::out);
+    gVerboseLog << "============================================================" << std::endl;
+    gVerboseLog << "G4d2o Simulation Verbose Output" << std::endl;
+    gVerboseLog << "============================================================" << std::endl;
+    gVerboseLog << std::endl;
+
     HCoE = NULL;
     for (G4int i = 0; i < MAX_SEN_DET; i++)
     {
@@ -44,20 +186,17 @@ G4d2oEventAction::G4d2oEventAction(void)
 
     if (!TClassTable::GetDict("simEvent"))
     {
-        G4cout << "Error in G4d2oEventAction::G4d2oEventAction() - class simEvent not found\n"
-               << G4endl;
+        G4cout << "Error in G4d2oEventAction::G4d2oEventAction() - class simEvent not found\n" << G4endl;
         exit(0);
     }
     if (!TClassTable::GetDict("simHit"))
     {
-        G4cout << "Error in G4d2oEventAction::G4d2oEventAction() - class simHit not found\n"
-               << G4endl;
+        G4cout << "Error in G4d2oEventAction::G4d2oEventAction() - class simHit not found\n" << G4endl;
         exit(0);
     }
     if (!TClassTable::GetDict("simAreaHit"))
     {
-        G4cout << "Error in G4d2oEventAction::G4d2oEventAction() - class simAreaHit not found\n"
-               << G4endl;
+        G4cout << "Error in G4d2oEventAction::G4d2oEventAction() - class simAreaHit not found\n" << G4endl;
         exit(0);
     }
     theEventData = new simEvent();
@@ -75,7 +214,6 @@ G4d2oEventAction::G4d2oEventAction(void)
         exit(0);
     }
 
-    // some histograms
     if (numPMTs > 0 && numRows > 0 && numInEachRow > 0)
     {
         hPMTArray = new TH2D("hPMTArray", "PMT hit pattern", numInEachRow, -0.5, numInEachRow - 0.5, numRows, -0.5, numRows - 0.5);
@@ -86,7 +224,6 @@ G4d2oEventAction::G4d2oEventAction(void)
         hPMTArray = 0;
         hPMTNumVsTime = 0;
     }
-    //    hPhotonEnergy = new TH1D("hPhotonEnergy","Photon Energy",500,0,1000.0);
     hPhotonEnergy = new TH1D("hPhotonEnergy", "Photon Energy", 500, 1.0, 10.0);
     hTotalPhotons = new TH1D("hTotalPhotons", "Total photons", 1000, 0, 10000);
 
@@ -103,45 +240,22 @@ G4d2oEventAction::G4d2oEventAction(void)
         }
     }
 
-    thePGA = (G4d2oPrimaryGeneratorAction *)G4RunManager::GetRunManager()->GetUserPrimaryGeneratorAction();
-    /*
-        // Photons are now thrown out at generation rather than detection
-        const double hc_evnm = 1.23984193 *1e3;
-
-        std::vector<double> qe_bialkali_y = {0.000,0.000,0.000,0.000,
-          0.001,0.003,0.008,0.017,
-          0.033,0.052,0.076,0.106,
-          0.139,0.164,0.193,0.204,
-          0.228,0.240,0.254,0.254,
-          0.240,0.213,0.164,0.032,
-          0.003,0.0};
-
-        std::vector<double> qe_bialkali_xgev = {1.63e-9,1.68e-9,1.72e-9,1.77e-9,
-          1.82e-9,1.88e-9,1.94e-9,2.00e-9,
-          2.07e-9,2.14e-9,2.21e-9,2.30e-9,
-          2.38e-9,2.48e-9,2.58e-9,2.70e-9,
-          2.82e-9,2.95e-9,3.10e-9,3.26e-9,
-          3.44e-9,3.65e-9,3.88e-9,4.13e-9,
-          4.43e-9,4.7e-9};
-
-        std::vector<double> qe_bialkali_xnm;
-
-        for(auto xgev : qe_bialkali_xgev) qe_bialkali_xnm.push_back(hc_evnm/(xgev*1e9));
-
-        gBialkali_ev = new TGraph(qe_bialkali_xgev.size());
-
-        for(int ipoint = 0; ipoint<qe_bialkali_xnm.size(); ipoint++ ){
-            gBialkali_ev->SetPoint(ipoint,qe_bialkali_xgev[ipoint]*1e9,qe_bialkali_y[ipoint]);
-        }
-    */
+    const G4VUserPrimaryGeneratorAction* constPga = G4RunManager::GetRunManager()->GetUserPrimaryGeneratorAction();
+    thePGA = const_cast<G4VUserPrimaryGeneratorAction*>(constPga);
 
     G4cerr << "done." << G4endl;
-
-} // END of constructor
+}
 
 G4d2oEventAction::~G4d2oEventAction()
 {
     G4cout << "Deleting G4d2oEventAction";
+
+    // Close verbose log file
+    gVerboseLog << std::endl;
+    gVerboseLog << "============================================================" << std::endl;
+    gVerboseLog << "End of Verbose Output" << std::endl;
+    gVerboseLog << "============================================================" << std::endl;
+    gVerboseLog.close();
 
     if (outTree)
     {
@@ -169,7 +283,6 @@ G4d2oEventAction::~G4d2oEventAction()
 
         fout->mkdir("pmtPositions");
         fout->cd("pmtPositions");
-        // save histograms with coordinates of the front faces of PMTs
         if (theDet->GetPMTPositionHistogram(0))
             theDet->GetPMTPositionHistogram(0)->Write("pmtPosX");
         if (theDet->GetPMTPositionHistogram(1))
@@ -185,28 +298,31 @@ G4d2oEventAction::~G4d2oEventAction()
     lastFile.close();
 
     delete fout;
-
     delete gBialkali_ev;
 
     G4cout << "...done" << G4endl << G4endl;
-
     G4cout << "\t**********************************************************************************" << G4endl;
     G4cout << "\t***   Output File: " << theOutFileName << " " << G4endl;
     G4cout << "\t**********************************************************************************" << G4endl;
     G4cout << G4endl << G4endl;
-
-} // END of constructor
+}
 
 void G4d2oEventAction::BeginOfEventAction(const G4Event *thisEvent)
 {
-
     fVetoEdep = 0.0;
-
     ResetNarrowVetoEdep();
     ResetWideVetoEdep();
-    //    thisEvent = 0;
 
-} // END of BeginOfEventAction()
+    TrackInfoManager::GetInstance()->Clear();
+
+    // ============================================================
+    // FIX: DO NOT mute the StepRecorder - let it record steps
+    // ============================================================
+    G4d2oStepRecorder* stepRecorder = dynamic_cast<G4d2oStepRecorder*>(G4VSteppingVerbose::GetInstance());
+    if (stepRecorder) {
+        stepRecorder->SetSilent(false);  // ← RECORD STEPS!
+    }
+}
 
 void G4d2oEventAction::EndOfEventAction(const G4Event *thisEvent)
 {
@@ -221,7 +337,6 @@ void G4d2oEventAction::EndOfEventAction(const G4Event *thisEvent)
     for (int i = 0; i < kWidePanels; ++i)
         theEventData->wide_veto_edep[i] = fWideVetoEdep[i];
 }
-// END of EndOfEventAction()
 
 void G4d2oEventAction::GetHitsCollection(void)
 {
@@ -231,275 +346,101 @@ void G4d2oEventAction::GetHitsCollection(void)
         sourceHC[i] = (G4d2oDetectorHitsCollection *)HCoE->GetHC(input->srcCollID[i]);
     for (Int_t i = 0; i < input->numTargHC; i++)
         targHC[i] = (G4d2oDetectorHitsCollection *)HCoE->GetHC(input->targCollID[i]);
-
-} // END of GetHitsCollection()
+}
 
 void G4d2oEventAction::ProcessEvent(void)
 {
     theEventData->ClearData();
     ZeroEventVariables();
     numEvents++;
-
     eventNumber = numEvents;
+
+    // ============================================================
+    // VERBOSE LOGGING: Event header
+    // ============================================================
+    if (gVerboseEventCount < MAX_VERBOSE_EVENTS) {
+        gVerboseLog << "\n" << std::string(80, '=') << std::endl;
+        gVerboseLog << "EVENT " << eventNumber << std::endl;
+        gVerboseLog << std::string(80, '=') << std::endl;
+        gVerboseLog << std::endl;
+    }
+
+    PropagateParentType(TrackInfoManager::GetInstance());
 
     G4d2oDetectorHit *thisHit;
 
-    G4ThreeVector initDir = thePGA->GetInitialDirection();
+    G4ThreeVector initDir(0,0,0);
+    G4ThreeVector initPos(0,0,0);
+    G4double sourceEnergy = 0;
+
+    G4d2oNeutronGun* neutronGun = dynamic_cast<G4d2oNeutronGun*>(thePGA);
+    if (neutronGun) {
+        initDir = neutronGun->GetInitialDirection();
+        initPos = neutronGun->GetOriginalPosition();
+        sourceEnergy = neutronGun->GetSourceEnergy();
+    } else {
+        G4d2oPrimaryGeneratorAction* primaryAction = dynamic_cast<G4d2oPrimaryGeneratorAction*>(thePGA);
+        if (primaryAction) {
+            initDir = primaryAction->GetInitialDirection();
+            initPos = primaryAction->GetOriginalPosition();
+            sourceEnergy = primaryAction->GetSourceEnergy();
+        }
+    }
+
     theEventData->direction0.SetXYZ(initDir.x(), initDir.y(), initDir.z());
-    G4ThreeVector initPos = thePGA->GetOriginalPosition();
     theEventData->position0.SetXYZ(initPos.x(), initPos.y(), initPos.z());
-    theEventData->sourceParticleEnergy = thePGA->GetSourceEnergy();
+    theEventData->sourceParticleEnergy = sourceEnergy;
     theEventData->eventNumber = eventNumber;
     theEventData->vol0 = -1;
+
+    // ============================================================
+    // VERBOSE LOGGING: Primary particle info
+    // ============================================================
+    if (gVerboseEventCount < MAX_VERBOSE_EVENTS) {
+        gVerboseLog << "Primary Neutron: " << std::endl;
+        gVerboseLog << "  Position: (" << initPos.x()/cm << ", " << initPos.y()/cm << ", " << initPos.z()/cm << ") cm" << std::endl;
+        gVerboseLog << "  Energy: " << sourceEnergy/MeV << " MeV" << std::endl;
+        gVerboseLog << "  Direction: (" << initDir.x() << ", " << initDir.y() << ", " << initDir.z() << ")" << std::endl;
+        gVerboseLog << std::endl;
+    }
 
     G4Navigator *Navigator = G4TransportationManager::GetTransportationManager()->GetNavigatorForTracking();
 
     G4VPhysicalVolume *volume0 = Navigator->LocateGlobalPointAndSetup(initPos);
     if (volume0->GetName() == "h2oPhysV")
-    {
         theEventData->vol0 = 2;
-    }
     else if (volume0->GetName() == "d2oPhysV")
-    {
         theEventData->vol0 = 1;
-    }
     else if (volume0->GetName() == "acrylicPhysV")
-    {
         theEventData->vol0 = 3;
-    }
-    else if (volume0->GetName() == "pmtPhysV_0")
-    {
-        theEventData->vol0 = 4;
-    }
-    else if (volume0->GetName() == "pmtPhysV_1")
-    {
-        theEventData->vol0 = 5;
-    }
-    else if (volume0->GetName() == "pmtPhysV_2")
-    {
-        theEventData->vol0 = 6;
-    }
-    else if (volume0->GetName() == "pmtPhysV_3")
-    {
-        theEventData->vol0 = 7;
-    }
-    else if (volume0->GetName() == "pmtPhysV_4")
-    {
-        theEventData->vol0 = 8;
-    }
-    else if (volume0->GetName() == "pmtPhysV_5")
-    {
-        theEventData->vol0 = 9;
-    }
-    else if (volume0->GetName() == "pmtPhysV_6")
-    {
-        theEventData->vol0 = 10;
-    }
-    else if (volume0->GetName() == "pmtPhysV_7")
-    {
-        theEventData->vol0 = 11;
-    }
-    else if (volume0->GetName() == "pmtPhysV_8")
-    {
-        theEventData->vol0 = 12;
-    }
-    else if (volume0->GetName() == "pmtPhysV_9")
-    {
-        theEventData->vol0 = 13;
-    }
-    else if (volume0->GetName() == "pmtPhysV_10")
-    {
-        theEventData->vol0 = 14;
-    }
-    else if (volume0->GetName() == "pmtPhysV_11")
-    {
-        theEventData->vol0 = 15;
-    }
-    else if (volume0->GetName() == "pmtPhysV_12")
-    {
-        theEventData->vol0 = 16;
-    }
-    else if (volume0->GetName() == "pmtPhysV_13")
-    {
-        theEventData->vol0 = 17;
-    }
-    else if (volume0->GetName() == "pmtPhysV_14")
-    {
-        theEventData->vol0 = 18;
-    }
-    else if (volume0->GetName() == "pmtPhysV_15")
-    {
-        theEventData->vol0 = 19;
-    }
-    else if (volume0->GetName() == "pmtPhysV_16")
-    {
-        theEventData->vol0 = 20;
-    }
-    else if (volume0->GetName() == "pmtPhysV_17")
-    {
-        theEventData->vol0 = 21;
-    }
-    else if (volume0->GetName() == "pmtPhysV_18")
-    {
-        theEventData->vol0 = 22;
-    }
-    else if (volume0->GetName() == "pmtPhysV_19")
-    {
-        theEventData->vol0 = 23;
-    }
-    else if (volume0->GetName() == "pmtPhysV_20")
-    {
-        theEventData->vol0 = 24;
-    }
-    else if (volume0->GetName() == "pmtPhysV_21")
-    {
-        theEventData->vol0 = 25;
-    }
-    else if (volume0->GetName() == "pmtPhysV_22")
-    {
-        theEventData->vol0 = 26;
-    }
-    else if (volume0->GetName() == "pmtPhysV_23")
-    {
-        theEventData->vol0 = 27;
-    }
-    else if (volume0->GetName() == "pmtPhysV_24")
-    {
-        theEventData->vol0 = 28;
-    }
-    else if (volume0->GetName() == "pmtPhysV_25")
-    {
-        theEventData->vol0 = 29;
-    }
-    else if (volume0->GetName() == "pmtPhysV_26")
-    {
-        theEventData->vol0 = 30;
-    }
-    else if (volume0->GetName() == "pmtPhysV_27")
-    {
-        theEventData->vol0 = 31;
-    }
-    else if (volume0->GetName() == "pmtPhysV_28")
-    {
-        theEventData->vol0 = 32;
-    }
-    else if (volume0->GetName() == "pmtPhysV_29")
-    {
-        theEventData->vol0 = 33;
-    }
-    else if (volume0->GetName() == "pmtPhysV_30")
-    {
-        theEventData->vol0 = 34;
-    }
-    else if (volume0->GetName() == "pmtPhysV_31")
-    {
-        theEventData->vol0 = 35;
-    }
-    else if (volume0->GetName() == "pmtPhysV_32")
-    {
-        theEventData->vol0 = 36;
-    }
-    else if (volume0->GetName() == "pmtPhysV_33")
-    {
-        theEventData->vol0 = 37;
-    }
-    else if (volume0->GetName() == "pmtPhysV_34")
-    {
-        theEventData->vol0 = 38;
-    }
-    else if (volume0->GetName() == "pmtPhysV_35")
-    {
-        theEventData->vol0 = 39;
-    }
-    else if (volume0->GetName() == "pmtPhysV_36")
-    {
-        theEventData->vol0 = 40;
-    }
-    else if (volume0->GetName() == "pmtPhysV_37")
-    {
-        theEventData->vol0 = 41;
-    }
-    else if (volume0->GetName() == "pmtPhysV_38")
-    {
-        theEventData->vol0 = 42;
-    }
-    else if (volume0->GetName() == "pmtPhysV_39")
-    {
-        theEventData->vol0 = 43;
-    }
-    else if (volume0->GetName() == "pmtPhysV_40")
-    {
-        theEventData->vol0 = 44;
-    }
-    else if (volume0->GetName() == "pmtPhysV_41")
-    {
-        theEventData->vol0 = 45;
-    }
-    else if (volume0->GetName() == "pmtPhysV_42")
-    {
-        theEventData->vol0 = 46;
-    }
-    else if (volume0->GetName() == "pmtPhysV_43")
-    {
-        theEventData->vol0 = 47;
-    }
-    else if (volume0->GetName() == "pmtPhysV_44")
-    {
-        theEventData->vol0 = 48;
-    }
-    else if (volume0->GetName() == "pmtPhysV_45")
-    {
-        theEventData->vol0 = 49;
-    }
-    else if (volume0->GetName() == "pmtPhysV_46")
-    {
-        theEventData->vol0 = 50;
-    }
-    else if (volume0->GetName() == "pmtPhysV_47")
-    {
-        theEventData->vol0 = 51;
-    }
 
-    // Form("pmtPhysV_%d",iCopy)
+    std::map<std::string, int> vmuid = {{"muVetoBI", 0}, {"muVetoBO", 1}, {"muVetoTI", 2}, {"muVetoTO", 3},
+                                        {"muVetoLI", 4}, {"muVetoLO", 5}, {"muVetoRI", 6}, {"muVetoRO", 7},
+                                        {"muVetoNI", 8}, {"muVetoNO", 9}, {"muVetoFI", 10}, {"muVetoFO", 11}};
 
-    // TODO: Ask Matthew where I can put this more globally
-    std::map<std::string, int> vmuid = {{"muVetoBI", 0}, {"muVetoBO", 1}, {"muVetoTI", 2}, {"muVetoTO", 3}, {"muVetoLI", 4}, {"muVetoLO", 5}, {"muVetoRI", 6}, {"muVetoRO", 7}, {"muVetoNI", 8}, {"muVetoNO", 9}, // Near to walkway
-                                        {"muVetoFI", 10},
-                                        {"muVetoFO", 11}}; // Far to walkway, against wall
+    bool hasNeutronCapture = false;
+    bool captureOnH = false;
+    bool captureOnD = false;
+    double captureT = 0.0;
+    double captureGammaE = 0.0;
+    double captureProductE = 0.0;
+    double captureNeutronE = 0.0;
+    TString captureProduct = "";
+    TString captureVol = "";
+    double capPosX = 0.0, capPosY = 0.0, capPosZ = 0.0;
 
-    // Loop through the detector hits collection
     for (G4int iDetHC = 0; iDetHC < input->numDetHC; iDetHC++)
     {
         if (detHC[iDetHC])
         {
             TString SDname = detHC[iDetHC]->GetSDname().data();
-            if (SDname.BeginsWith("muVetoInner"))
+            if (SDname.BeginsWith("muVetoInner") || SDname.BeginsWith("muVetoOuter") || SDname.BeginsWith("muVeto"))
             {
                 int muid = 0;
-                for (G4int i = 0; i < detHC[iDetHC]->entries(); i++)
-                {
-                    thisHit = (*detHC[iDetHC])[i];
-                    if (thisHit->GetPDGCharge() != 0)
-                    {
-                        theEventData->muVetoEnergy[muid] += thisHit->GetTotalEnergyDeposit();
-                    }
-                }
-            }
-            else if (SDname.BeginsWith("muVetoOuter"))
-            {
-                int muid = 1;
-                for (G4int i = 0; i < detHC[iDetHC]->entries(); i++)
-                {
-                    thisHit = (*detHC[iDetHC])[i];
-                    if (thisHit->GetPDGCharge() != 0)
-                    {
-                        theEventData->muVetoEnergy[muid] += thisHit->GetTotalEnergyDeposit();
-                    }
-                }
-            }
-            else if (SDname.BeginsWith("muVeto"))
-            {
-                int muid = vmuid[SDname.Data()];
+                if (SDname.BeginsWith("muVetoInner")) muid = 0;
+                else if (SDname.BeginsWith("muVetoOuter")) muid = 1;
+                else muid = vmuid[SDname.Data()];
+
                 for (G4int i = 0; i < detHC[iDetHC]->entries(); i++)
                 {
                     thisHit = (*detHC[iDetHC])[i];
@@ -515,125 +456,84 @@ void G4d2oEventAction::ProcessEvent(void)
                 {
                     thisHit = (*detHC[iDetHC])[i];
 
+                    if (thisHit->GetIsNeutronCapture())
+                    {
+                        hasNeutronCapture = true;
+                        captureOnH = thisHit->GetCaptureOnHydrogen();
+                        captureOnD = thisHit->GetCaptureOnDeuterium();
+                        captureT = thisHit->GetCaptureTime();
+                        captureGammaE = thisHit->GetCaptureGammaEnergy();
+                        captureProductE = thisHit->GetCaptureProductEnergy();
+                        captureNeutronE = thisHit->GetCaptureNeutronEnergy();
+                        captureProduct = thisHit->GetCaptureProduct();
+                        captureVol = thisHit->GetCaptureVolume();
+                        capPosX = thisHit->GetCapturePosX();
+                        capPosY = thisHit->GetCapturePosY();
+                        capPosZ = thisHit->GetCapturePosZ();
+                    }
+
                     G4String hitParticleName = thisHit->GetParticleName();
+                    
+                    // ============================================================
+                    // VERBOSE LOGGING: Particle hits
+                    // ============================================================
+                    if (gVerboseEventCount < MAX_VERBOSE_EVENTS) {
+                        G4String volName = thisHit->GetMaterialName();
+                        G4double energy = thisHit->GetKineticEnergy();
+                        G4double time = thisHit->GetGlobalTime();
+                        gVerboseLog << "  Particle: " << hitParticleName 
+                                   << " | E = " << energy/eV << " eV"
+                                   << " | t = " << time/ns << " ns"
+                                   << " | Vol = " << volName
+                                   << " | PDG = " << thisHit->GetPDGEncoding()
+                                   << std::endl;
+                    }
+                    
                     if (hitParticleName == "opticalphoton")
                     {
-
                         G4int hitPMTNumber = thisHit->GetDetectorNumber();
                         G4double hitGlobalTime = thisHit->GetGlobalTime();
                         G4double hitKineticEnergy = thisHit->GetKineticEnergy();
-
-                        // Photons now thrown out at generation not detection
-                        // if(G4UniformRand()>qe_ev(hitKineticEnergy/eV)) continue;
-
-                        //-----------------------------------------------------------
-
-                        // 02/14/2023:
-                        // NEW: Detecting everything based on individual PMT QE,
-                        //     obtained from DATA and MC p.e. distribution ratios.
-
-#if 1
-                        if (hitPMTNumber == 0)
-                        { // pmt_qe_scaling = 0.8329
-                            if (G4UniformRand() > 0.8329)
-                                continue;
+                        
+                        G4int hitPDGCode = thisHit->GetPDGEncoding();
+                        
+                        G4int parentType = 4;
+                        
+                        G4int trackID = thisHit->GetTrackID();
+                        const TrackInfo* trackInfo = TrackInfoManager::GetInstance()->GetTrackInfo(trackID);
+                        
+                        if (trackInfo) {
+                            parentType = trackInfo->parentType;
                         }
 
-                        if (hitPMTNumber == 1)
-                        { // pmt_qe_scaling=0.8197
-                            if (G4UniformRand() > 0.8197)
-                                continue;
-                        }
+                        // PMT QE scaling
+                        if (hitPMTNumber == 0 && G4UniformRand() > 0.8329) continue;
+                        if (hitPMTNumber == 1 && G4UniformRand() > 0.8197) continue;
+                        if (hitPMTNumber == 2 && G4UniformRand() > 0.9205) continue;
+                        if (hitPMTNumber == 3 && G4UniformRand() > 0.6747) continue;
+                        if (hitPMTNumber == 4 && G4UniformRand() > 0.8538) continue;
+                        if (hitPMTNumber == 5 && G4UniformRand() > 1.0000) continue;
+                        if (hitPMTNumber == 6 && G4UniformRand() > 0.9951) continue;
+                        if (hitPMTNumber == 7 && G4UniformRand() > 0.8934) continue;
+                        if (hitPMTNumber == 8 && G4UniformRand() > 0.7615) continue;
+                        if (hitPMTNumber == 9 && G4UniformRand() > 1.0000) continue;
+                        if (hitPMTNumber == 10 && G4UniformRand() > 0.6164) continue;
+                        if (hitPMTNumber == 11 && G4UniformRand() > 1.0000) continue;
 
-                        if (hitPMTNumber == 2)
-                        { // pmt_qe_scaling=0.9205
-                            if (G4UniformRand() > 0.9205)
-                                continue;
-                        }
-
-                        if (hitPMTNumber == 3)
-                        { // pmt_qe_scaling=0.6747
-                            if (G4UniformRand() > 0.6747)
-                                continue;
-                        }
-
-                        if (hitPMTNumber == 4)
-                        { // pmt_qe_scaling=0.8538
-                            if (G4UniformRand() > 0.8538)
-                                continue;
-                        }
-
-                        if (hitPMTNumber == 5)
-                        { // BAD PMT
-                            if (G4UniformRand() > 1.0000)
-                                continue;
-                        }
-
-                        if (hitPMTNumber == 6)
-                        { // pmt_qe_scaling=0.9951
-                            if (G4UniformRand() > 0.9951)
-                                continue;
-                        }
-
-                        if (hitPMTNumber == 7)
-                        { // pmt_qe_scaling=0.8934
-                            if (G4UniformRand() > 0.8934)
-                                continue;
-                        }
-
-                        if (hitPMTNumber == 8)
-                        { // pmt_qe_scaling=0.7615
-                            if (G4UniformRand() > 0.7615)
-                                continue;
-                        }
-
-                        if (hitPMTNumber == 9)
-                        { // BAD PMT
-                            if (G4UniformRand() > 1.0000)
-                                continue;
-                        }
-
-                        if (hitPMTNumber == 10)
-                        { // pmt_qe_scaling=0.6164
-                            if (G4UniformRand() > 0.6164)
-                                continue;
-                        }
-
-                        if (hitPMTNumber == 11)
-                        { // The one that sees more light
-                            if (G4UniformRand() > 1.0000)
-                                continue;
-                        }
-#endif
-
-                        //-----------------------------------------------------------
-
-                        // normal PMTs
                         if (detHC[iDetHC]->GetSDname() == "pmt")
                         {
-                            theEventData->AddPMTHit(hitPMTNumber, hitGlobalTime, hitKineticEnergy);
+                            theEventData->AddPMTHit(hitPMTNumber, hitGlobalTime, hitKineticEnergy, parentType);
                             if (hPMTArray)
                                 hPMTArray->Fill(hitPMTNumber / numRows, hitPMTNumber % numRows);
                             if (hPMTNumVsTime)
                                 hPMTNumVsTime->Fill(hitGlobalTime, hitPMTNumber);
                         }
-#if 0
-                        else{
-                            TVector3 hitPosition(thisHit->GetPosition().x(),thisHit->GetPosition().y(),thisHit->GetPosition().z());
-                            theEventData->AddAreaPMTHit(hitPMTNumber, hitGlobalTime, hitKineticEnergy, hitPosition);
-                            if(hitPMTNumber>=0 && hitPMTNumber<=1){
-                                if(hSidePMT[hitPMTNumber]) hSidePMT[hitPMTNumber]->Fill(hitPosition.X(),hitPosition.Z());
-                            }
-                        }
-#endif
                         hPhotonEnergy->Fill(hitKineticEnergy / eV);
+                    }
+                }
+            }
 
-                    } // check for an opticalphoton
-
-                } // loop over hits (i)
-            } // if no muon Veto Hits Collection
-
-            if (detHC[iDetHC]->GetSDname() == "topVetoSD") // && detHC[iDetHC]->GetSize() > 0)
+            if (detHC[iDetHC]->GetSDname() == "topVetoSD")
             {
                 if (detHC[iDetHC]->GetSize() > 0)
                 {
@@ -646,48 +546,172 @@ void G4d2oEventAction::ProcessEvent(void)
                     theEventData->veto_edep = fVetoEdep;
                 }
             }
-            //G4cout << "[EA] SD name seen: " << detHC[iDetHC]->GetSDname() << G4endl;
-if (detHC[iDetHC]->GetSDname() == "VetoNu1SD") {
-  for (int i=0;i<kNarrowPanels;++i)
-    theEventData->narrow_veto_edep[i] = fNarrowVetoEdep[i];
-}
 
-if (detHC[iDetHC]->GetSDname() == "VetoNu2SD") {
-  for (int i=0;i<kWidePanels;++i)
-    theEventData->wide_veto_edep[i] = fWideVetoEdep[i];
-}
+            if (detHC[iDetHC]->GetSDname() == "VetoNu1SD") {
+                for (int i=0;i<kNarrowPanels;++i)
+                    theEventData->narrow_veto_edep[i] = fNarrowVetoEdep[i];
+            }
 
-        } // detHC exists
-    } // loop over dethits collections
+            if (detHC[iDetHC]->GetSDname() == "VetoNu2SD") {
+                for (int i=0;i<kWidePanels;++i)
+                    theEventData->wide_veto_edep[i] = fWideVetoEdep[i];
+            }
+        }
+    }
+
+    // ============================================================
+    // VERBOSE LOGGING: Capture summary
+    // ============================================================
+    if (hasNeutronCapture && gVerboseEventCount < MAX_VERBOSE_EVENTS) {
+        gVerboseLog << std::endl;
+        gVerboseLog << "*** NEUTRON CAPTURE DETECTED ***" << std::endl;
+        gVerboseLog << "  Type: " << (captureOnD ? "Deuterium (D2O)" : "Hydrogen (H2O)") << std::endl;
+        gVerboseLog << "  Product: " << captureProduct << std::endl;
+        gVerboseLog << "  Capture Time: " << captureT << " ns" << std::endl;
+        gVerboseLog << "  Gamma Energy: " << captureGammaE << " MeV" << std::endl;
+        gVerboseLog << "  Neutron Energy: " << captureNeutronE << " eV" << std::endl;
+        gVerboseLog << "  Volume: " << captureVol << std::endl;
+        gVerboseLog << "  Position: (" << capPosX << ", " << capPosY << ", " << capPosZ << ") cm" << std::endl;
+        gVerboseLog << std::endl;
+    }
+
+    // ============================================================
+    // STORE NEUTRON CAPTURE INFORMATION
+    // ============================================================
+    theEventData->neutronCaptured = hasNeutronCapture;
+    theEventData->neutronCaptureOnHydrogen = captureOnH;
+    theEventData->neutronCaptureOnDeuterium = captureOnD;
+    theEventData->neutronCaptureTime = captureT;
+    theEventData->neutronCaptureGammaEnergy = captureGammaE;
+    theEventData->neutronCaptureProductEnergy = captureProductE;
+    theEventData->neutronCaptureProduct = captureProduct;
+    theEventData->neutronCaptureVolume = captureVol;
+    theEventData->neutronCaptureNHits = theEventData->numHits;
+    theEventData->neutronCapturePosX = capPosX;
+    theEventData->neutronCapturePosY = capPosY;
+    theEventData->neutronCapturePosZ = capPosZ;
+
+    // ============================================================
+    // RECORD STEP POINT DATA FROM STEP RECORDER
+    // ============================================================
+    theEventData->ClearStepData();
+
+    // Get step data from StepRecorder using static methods
+    std::vector<int>* trackID = G4d2oStepRecorder::GetTrackID();
+    std::vector<int>* stepNumber = G4d2oStepRecorder::GetStepNumber();
+    std::vector<int>* volumeCopy = G4d2oStepRecorder::GetVolumeCopy();
+    std::vector<int>* processID = G4d2oStepRecorder::GetProcessID();
+    std::vector<int>* pdg = G4d2oStepRecorder::GetPDG();
+    std::vector<int>* parentID = G4d2oStepRecorder::GetParentID();
+    std::vector<double>* posX = G4d2oStepRecorder::GetPosX();
+    std::vector<double>* posY = G4d2oStepRecorder::GetPosY();
+    std::vector<double>* posZ = G4d2oStepRecorder::GetPosZ();
+    std::vector<double>* kineticEnergy = G4d2oStepRecorder::GetKineticEnergy();
+    std::vector<double>* energyDeposit = G4d2oStepRecorder::GetEnergyDeposit();
+    std::vector<double>* globalTime = G4d2oStepRecorder::GetGlobalTime();
+    std::vector<double>* stepLength = G4d2oStepRecorder::GetStepLength();
+    
+    if (trackID && trackID->size() > 0) {
+        // Debug: print how many steps were recorded
+        if (eventNumber < 10) {
+            G4cout << "[EventAction] Event " << eventNumber 
+                   << ": Recording " << trackID->size() << " steps" << G4endl;
+        }
+        
+        for (size_t i = 0; i < trackID->size(); i++) {
+            theEventData->AddStepPoint(
+                (*trackID)[i],
+                (*stepNumber)[i],
+                (*volumeCopy)[i],
+                (*processID)[i],
+                (*pdg)[i],
+                (*parentID)[i],
+                (*posX)[i],
+                (*posY)[i],
+                (*posZ)[i],
+                (*kineticEnergy)[i],
+                (*energyDeposit)[i],
+                (*globalTime)[i],
+                (*stepLength)[i]
+            );
+        }
+        G4d2oStepRecorder::Clear();
+    }
+
+    // ============================================================
+    // VERBOSE LOGGING: Event summary
+    // ============================================================
+    if (gVerboseEventCount < MAX_VERBOSE_EVENTS) {
+        gVerboseLog << std::endl;
+        gVerboseLog << "Event Summary:" << std::endl;
+        gVerboseLog << "  Total PMT Hits: " << theEventData->numHits << std::endl;
+        gVerboseLog << "  Neutron Captured: " << (hasNeutronCapture ? "YES" : "NO") << std::endl;
+        gVerboseLog << "  Steps Recorded: " << (trackID ? trackID->size() : 0) << std::endl;
+        gVerboseLog << std::string(80, '=') << std::endl;
+        gVerboseLog << std::endl;
+        gVerboseLog.flush();
+        gVerboseEventCount++;
+    }
+
+    // ============================================================
+    // RECORD ALL PARTICLES WITH NAMES
+    // ============================================================
+    theEventData->ClearAllParticles();
+    
+    const auto& allTracks = TrackInfoManager::GetInstance()->GetAllTracks();
+    for (const auto& pair : allTracks) {
+        int trackID = pair.first;
+        const TrackInfo& info = pair.second;
+        
+        std::string particleName = info.particleName.data();
+        
+        int procID = 0;
+        if (info.creatorProcess == "Primary") procID = 0;
+        else if (info.creatorProcess == "nCapture") procID = 4131;
+        else if (info.creatorProcess == "neutronCapture") procID = 4131;
+        else if (info.creatorProcess == "compton") procID = 2013;
+        else if (info.creatorProcess == "phot") procID = 2012;
+        else if (info.creatorProcess == "conv") procID = 2014;
+        else if (info.creatorProcess == "Decay") procID = 6201;
+        else if (info.creatorProcess == "eIoni") procID = 2002;
+        else if (info.creatorProcess == "mIoni") procID = 2002;
+        else if (info.creatorProcess == "hIoni") procID = 2002;
+        else if (info.creatorProcess == "muIoni") procID = 2002;
+        else if (info.creatorProcess == "RadioactiveDecay") procID = 4210;
+        else if (info.creatorProcess == "neutronInelastic") procID = 4121;
+        else if (info.creatorProcess == "hadElastic") procID = 4111;
+        
+        theEventData->AddAllParticle(
+            trackID,
+            info.pdg,
+            info.parentID,
+            procID,
+            info.energy,
+            info.posX, info.posY, info.posZ,
+            info.time,
+            particleName
+        );
+    }
+
     if (eventNumber % 1000 == 0)
     {
         G4cout << "Completed Event " << eventNumber << G4endl;
         if (input->GetPGAType() == 10)
-        {
             G4cout << "Special Energy = " << input->GetSpecialEnergy() << G4endl;
-        }
     }
 
-    // Save to detector variables to pass to tree
-    // if(theEventData->numHits>0)
-    //outTree->Branch("narrow_veto_edep", theEventData->narrow_veto_edep, "narrow_veto_edep[4]/D");
     outTree->Fill();
-
     hTotalPhotons->Fill(theEventData->numHits);
-
-} // END of ProcessEvent()
+}
 
 void G4d2oEventAction::ZeroEventVariables(void)
 {
-
     eventNumber = 0;
-
-} // END of ZeroEventVariables()
+}
 
 double G4d2oEventAction::qe_ev(double energy_ev)
 {
-    if (!gBialkali_ev)
-        return 0.0;
+    if (!gBialkali_ev) return 0.0;
     if (energy_ev < gBialkali_ev->GetX()[0] || energy_ev > gBialkali_ev->GetX()[gBialkali_ev->GetN() - 1])
         return 0.0;
     return gBialkali_ev->Eval(energy_ev, 0, "");

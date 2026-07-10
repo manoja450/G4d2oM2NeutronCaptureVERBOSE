@@ -35,7 +35,8 @@ public:
     virtual G4ThreeVector GetOriginalPosition() { return SourcePosition; }
     virtual G4ThreeVector GetInitialDirection() { return initDir; }
     
-    ReplayTools *GetReplayTool() { return etfTimer; }
+    // Make this virtual so derived classes can override
+    virtual ReplayTools* GetReplayTool() { return etfTimer; }
     
 protected:
     

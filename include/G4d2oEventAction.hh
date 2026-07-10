@@ -18,6 +18,9 @@
 
 #include "TGraph.h"
 
+// Forward declarations
+class G4d2oNeutronGun;
+
 class G4d2oEventAction : public G4UserEventAction
 {
 protected:
@@ -26,7 +29,7 @@ protected:
     G4d2oDetectorHitsCollection *sourceHC[MAX_SEN_DET];
     G4d2oDetectorHitsCollection *targHC[MAX_SEN_DET];
 
-    G4d2oPrimaryGeneratorAction *thePGA;
+    G4VUserPrimaryGeneratorAction *thePGA;  // Changed to base class
     G4d2oDetector *theDet;
 
     G4int numEvents;
@@ -97,6 +100,6 @@ private:
     double fNarrowVetoEdep[kNarrowPanels] = {0,0,0,0};
     double fWideVetoEdep[kWidePanels] = {0,0,0,0};
 
-}; // END of class G4d2oEventAction
+};
 
 #endif

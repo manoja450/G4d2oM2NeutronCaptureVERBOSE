@@ -1,0 +1,38 @@
+# Build directories
+build/
+build*/
+G4d2o-build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Output
+OUTPUT/
+SIMULATIONLOGS/
+SLURMOUT/
+data/
+
+# ROOT and logs
+*.root
+*.log
+
+# Images
+*.png
+
+# Editor files
+*.swp
+*.swo
+*.swn
+*~
+
+# Backup files
+*.BACKUP
+*.bak
+*.BAKUP
+*.BACKUPM2
+*.BAKDUPm1
+
+# Temporary
+seedHistory.dat
+scripts/lastFileName.txt

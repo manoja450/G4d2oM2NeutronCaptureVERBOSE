@@ -585,3 +585,4 @@ G4int inputVariables::GetNewCollectionID(G4int iType)
     return iReturn;
 }
 
+

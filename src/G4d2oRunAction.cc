@@ -5,6 +5,7 @@
 #include "G4d2oNeutrinoAlley.hh"
 #include "G4d2oMaterialsDefinition.hh"
 #include "G4d2oPrimaryGeneratorAction.hh"
+#include "G4d2oNeutronGun.hh"
 
 #include "G4RunManager.hh"
 
@@ -36,26 +37,32 @@ G4d2oRunAction::G4d2oRunAction()
     system(Form("tar -czf %s/fileHistories/run%03d.tgz src/*.cc include/*.hh *.cc G4d2o.cc mac simEvent -C %s/beamOnFiles beamOn%03d.dat",path,runno,path,runno));
     mBeamOn = TMacro(Form("%s/beamOnFiles/beamOn%03d.dat",path,runno));
     
-    theRT = (ReplayTools*)((G4d2oPrimaryGeneratorAction*)G4RunManager::GetRunManager()->GetUserPrimaryGeneratorAction())->GetReplayTool();
+    // Get ReplayTools pointer safely
+    const G4VUserPrimaryGeneratorAction* constPga = G4RunManager::GetRunManager()->GetUserPrimaryGeneratorAction();
+    G4VUserPrimaryGeneratorAction* pga = const_cast<G4VUserPrimaryGeneratorAction*>(constPga);
+    theRT = nullptr;
+    
+    G4d2oPrimaryGeneratorAction* primaryAction = dynamic_cast<G4d2oPrimaryGeneratorAction*>(pga);
+    if (primaryAction) {
+        theRT = primaryAction->GetReplayTool();
+    } else {
+        G4d2oNeutronGun* neutronGun = dynamic_cast<G4d2oNeutronGun*>(pga);
+        if (neutronGun) {
+            theRT = neutronGun->GetReplayTool();
+        }
+    }
 
     G4cerr << "done." << G4endl;
-    
-}//END of constructor
+}
 
 G4d2oRunAction::~G4d2oRunAction()
 {
-	
-	G4cerr<<"Deleting G4d2oRunAction...";
-    	
+    G4cerr<<"Deleting G4d2oRunAction...";
     G4cerr << "done." << G4endl;
-    
-//	delete materialsPtr;
-    
-}//END of destructor
+}
 
 void G4d2oRunAction::BeginOfRunAction(const G4Run *aRun)
 {
-    
     ((G4Run *)(aRun))->SetRunID(runno);
     G4cout<<"\nRun ID: "<<aRun->GetRunID()<<G4endl<<G4endl;
     
@@ -75,13 +82,13 @@ void G4d2oRunAction::BeginOfRunAction(const G4Run *aRun)
     G4cerr << "\t*********************" << G4endl;
     G4cerr << G4endl;
     
-    theRT->DisplayProgress(-1);
-    
-}//END of BeginOfRunAction()
+    if (theRT) {
+        theRT->DisplayProgress(-1);
+    }
+}
 
 void G4d2oRunAction::EndOfRunAction(const G4Run*)
 {
-
     G4d2oNeutrinoAlley *detCon = (G4d2oNeutrinoAlley*)G4RunManager::GetRunManager()->GetUserDetectorConstruction();
     G4d2oDetector *theDet = (G4d2oDetector*)detCon->GetDetectorPtr();
     
@@ -91,7 +98,9 @@ void G4d2oRunAction::EndOfRunAction(const G4Run*)
                     theDet->TankY(),
                     theDet->TankZ());
     
-    theRT->DisplayProgress(-2);
+    if (theRT) {
+        theRT->DisplayProgress(-2);
+    }
     
     G4cerr << G4endl;
     G4cerr << "\t*********************" << G4endl;
@@ -102,16 +111,11 @@ void G4d2oRunAction::EndOfRunAction(const G4Run*)
     evAct->OutFilePtr()->cd();
     setupTree->Fill();
     setupTree->AutoSave();
-
-}//END of EndOfRunAction()
+}
 
 G4d2oMaterialsDefinition* G4d2oRunAction::GetMaterialsPointer( void )
 {
-    
     if( materialsPtr==NULL )
         materialsPtr = new G4d2oMaterialsDefinition();
-	
     return materialsPtr;
-	
-}//END of GetMaterialsPointer()
-
+}

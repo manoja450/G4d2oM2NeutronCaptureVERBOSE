@@ -1,145 +1,202 @@
 #include "G4d2oNeutronGun.hh"
-#include "inputVariables.hh"
-#include "TMath.h"
-#include "TRandom.h"
-#include "TVector3.h"
-#include "TSystem.h"
 
 #include "G4Event.hh"
 #include "G4ParticleGun.hh"
 #include "G4ParticleTable.hh"
-#include "G4IonTable.hh"
-#include "G4ParticleDefinition.hh"
 #include "G4RunManager.hh"
 #include "G4Navigator.hh"
 #include "G4TransportationManager.hh"
-#include "globals.hh"
 #include "Randomize.hh"
-#include "G4GeneralParticleSource.hh"
+#include "G4SystemOfUnits.hh"
+#include "G4PhysicalVolumeStore.hh"
+
+#include "TMath.h"
+#include "TRandom.h"
+#include "TSystem.h"
 
 G4d2oNeutronGun::G4d2oNeutronGun()
+    : G4d2oPrimaryGeneratorAction()
 {
-    
     G4cout << "\tConstructing G4d2oNeutronGun..." ;
-    
-    //Set random seed variables
+
     input = inputVariables::GetIVPointer();
-    G4int irand = input->GetRandomStatus();
-    if(irand==0) gRandom->SetSeed(1);
-    if(irand==1) gRandom->SetSeed(0);
+    irand = input->GetRandomStatus();
+    if (irand == 0) gRandom->SetSeed(1);
+    if (irand == 1) gRandom->SetSeed(0);
     totalEvents = input->GetNumberOfEvents();
 
-    //Initialize a few things
-    G4int n_particle = 1;
-    particleGun = new G4ParticleGun(n_particle);
-    
-    //Set the particle name
-    G4String particleName = "neutron"; // return to THIS
-    //G4String particleName = "mu-";
-
-    //set up the gun
+    if (particleGun) {
+        delete particleGun;
+    }
+    particleGun = new G4ParticleGun(1);
+    G4String particleName = "neutron";
     G4ParticleTable* particleTable = G4ParticleTable::GetParticleTable();
     particleGun->SetParticleDefinition(particleTable->FindParticle(particleName));
-    
-    SourcePosition.setX(0);
-    SourcePosition.setY(0);
-    SourcePosition.setZ(0);
-    
-    G4double thetaAngle1 = 0.0; //in degrees
-    G4double thetaAngle2 = 180.0; //in degrees
-    
-    cthetaRange1 = cos(thetaAngle1*deg);
-    cthetaRange2 = cos(thetaAngle2*deg);
-    
-    G4d2oNeutrinoAlley *detCon = (G4d2oNeutrinoAlley*)G4RunManager::GetRunManager()->GetUserDetectorConstruction();
-    G4d2oDetector *theDet = (G4d2oDetector*)detCon->GetDetectorPtr();
-    // Inner Tank of D20
-    // tankSize.set(theDet->TankX(),theDet->TankY(),theDet->TankZ());
-    // Outer Tank of H20
-    tankSize.set(theDet->OuterTankX(),theDet->OuterTankY(),theDet->OuterTankZ());
 
-    etfTimer = new ReplayTools();
-    etfTimer->PrepareETFTimer(5000, input->GetNumberOfEvents()); //time in ms
-    
+    SourcePosition.setX(0.0);
+    SourcePosition.setY(0.0);
+    SourcePosition.setZ(0.0);
+
+    G4double thetaAngle1 = 0.0;
+    G4double thetaAngle2 = 180.0;
+    cthetaRange1 = cos(thetaAngle1 * deg);
+    cthetaRange2 = cos(thetaAngle2 * deg);
+
+    // ---- Hardcode outer H2O geometry (from your detector) ----
+    h2oGlobalCenter.setX(0.0);
+    h2oGlobalCenter.setY(110.73384 * cm);
+    h2oGlobalCenter.setZ(-80.74526 * cm);
+    h2oGlobalRadius = 44.45 * cm;
+    h2oGlobalHalfHeight = 95.3135 * cm;
+    h2oVolumeFound = true;
+
+    G4cout << "  H2O center: (" << h2oGlobalCenter.x()/cm << ", "
+           << h2oGlobalCenter.y()/cm << ", " << h2oGlobalCenter.z()/cm << ") cm" << G4endl;
+    G4cout << "  H2O radius: " << h2oGlobalRadius/cm << " cm" << G4endl;
+    G4cout << "  H2O half-height: " << h2oGlobalHalfHeight/cm << " cm" << G4endl;
+    G4cout << "  Top Beam mode:   " << (fTopBeamMode ? "ON" : "OFF") << G4endl;
+    G4cout << "  Side Beam mode:  " << (fSideBeamMode ? "ON" : "OFF") << G4endl;
+    G4cout << "  Volume mode:     " << (fVolumeMode ? "ON" : "OFF") << G4endl;
     G4cout << "done." << G4endl;
-
-}//END of constructor
+}
 
 G4d2oNeutronGun::~G4d2oNeutronGun()
 {
-    
-	G4cout<<"Deleting G4d2oNeutronGun...";
-	
-//    delete particleGun;
-	
-	G4cout<<"done."<<G4endl;
-	
-}//END of destructor
+    G4cout << "Deleting G4d2oNeutronGun...";
+    G4cout << "done." << G4endl;
+}
+
+void G4d2oNeutronGun::GenerateVolumeNeutron()
+{
+    // Original uniform generation inside D₂O
+    G4double maxRadius = 33.655;
+    G4double randvarn1 = maxRadius * sqrt(G4UniformRand());
+    G4double randvarn2 = 2.0 * TMath::Pi() * G4UniformRand();
+    G4double randvarn3 = 89.9275 * (-1.0 + 2.0 * G4UniformRand());
+
+    G4double x = randvarn1 * cos(randvarn2);
+    G4double y = 110.73384 + randvarn1 * sin(randvarn2);
+    G4double z = -80.74526 + randvarn3;
+
+    SourcePosition.setX(x * cm);
+    SourcePosition.setY(y * cm);
+    SourcePosition.setZ(z * cm);
+
+    G4double ctheta = G4UniformRand() * (cthetaRange1 - cthetaRange2) + cthetaRange2;
+    G4double phi = 2.0 * TMath::Pi() * G4UniformRand();
+    G4double stheta = sqrt(1.0 - ctheta * ctheta);
+
+    G4double px = stheta * cos(phi);
+    G4double py = stheta * sin(phi);
+    G4double pz = ctheta;
+
+    initDir.setX(px);
+    initDir.setY(py);
+    initDir.setZ(pz);
+    initDir = initDir.unit();
+
+    particleGun->SetParticleMomentumDirection(initDir);
+    sourceEnergy = 0.025 * eV;
+    particleGun->SetParticleEnergy(sourceEnergy);
+}
+
+void G4d2oNeutronGun::GenerateTopBeamNeutron()
+{
+    // Use hardcoded H2O geometry
+    G4double planeZ = h2oGlobalCenter.z() + h2oGlobalHalfHeight - 0.5 * cm; // ~14.07 cm
+    G4double R = h2oGlobalRadius - 0.5 * cm;
+
+    G4double r = R * sqrt(G4UniformRand());
+    G4double phi = 2.0 * TMath::Pi() * G4UniformRand();
+
+    G4double x = h2oGlobalCenter.x() + r * cos(phi);
+    G4double y = h2oGlobalCenter.y() + r * sin(phi);
+
+    SourcePosition.setX(x);
+    SourcePosition.setY(y);
+    SourcePosition.setZ(planeZ);
+
+    // Downward hemisphere (pz < 0)
+    G4double ctheta = -G4UniformRand();
+    G4double stheta = sqrt(1.0 - ctheta * ctheta);
+    G4double pphi = 2.0 * TMath::Pi() * G4UniformRand();
+
+    initDir.setX(stheta * cos(pphi));
+    initDir.setY(stheta * sin(pphi));
+    initDir.setZ(ctheta);
+    initDir = initDir.unit();
+
+    particleGun->SetParticleMomentumDirection(initDir);
+    sourceEnergy = 0.025 * eV;
+    particleGun->SetParticleEnergy(sourceEnergy);
+}
+
+void G4d2oNeutronGun::GenerateSideBeamNeutron()
+{
+    G4double R = h2oGlobalRadius - 0.5 * cm;
+    G4double offset = 1.0 * cm;
+    G4double Xpos = h2oGlobalCenter.x() - (R - offset);
+
+    G4double dx = Xpos - h2oGlobalCenter.x();
+    G4double maxY = sqrt(R * R - dx * dx);
+
+    G4double y = h2oGlobalCenter.y() + (2.0 * G4UniformRand() - 1.0) * maxY;
+    G4double z = h2oGlobalCenter.z() + (2.0 * G4UniformRand() - 1.0) * (h2oGlobalHalfHeight - 0.5 * cm);
+
+    SourcePosition.setX(Xpos);
+    SourcePosition.setY(y);
+    SourcePosition.setZ(z);
+
+    // Forward hemisphere (px > 0)
+    G4double ctheta = G4UniformRand();
+    G4double stheta = sqrt(1.0 - ctheta * ctheta);
+    G4double pphi = 2.0 * TMath::Pi() * G4UniformRand();
+
+    initDir.setX(ctheta);
+    initDir.setY(stheta * cos(pphi));
+    initDir.setZ(stheta * sin(pphi));
+    initDir = initDir.unit();
+
+    particleGun->SetParticleMomentumDirection(initDir);
+    sourceEnergy = 0.025 * eV;
+    particleGun->SetParticleEnergy(sourceEnergy);
+}
 
 void G4d2oNeutronGun::GeneratePrimaries(G4Event* anEvent)
 {
-    
     theEventNum = anEvent->GetEventID();
-    etfTimer->SetCurrentEvent(theEventNum);
-    gSystem->ProcessEvents();
-    
-    if(anEvent->GetEventID()==0 && input->GetPrintStatus()!=3) etfTimer->StartUpdateTimer();
-        
-    G4double px, py, pz;
-    G4double ctheta, stheta, phi;
 
-    sourceEnergy = (100.0)*MeV;
-
-    particleGun->SetParticleEnergy( sourceEnergy ); // return to THIS
-  
-    G4Navigator* Navigator = G4TransportationManager::GetTransportationManager()->GetNavigatorForTracking();
-
-    int ntries = 0;
-
-    G4double randvarn1; // rho, radius
-    G4double randvarn2; // theta, xy angle
-    G4double randvarn3; // length of the tank
-    while(true){//ntries < anEvent->GetEventID()){
-      randvarn1 = 44.45*sqrt(G4UniformRand()); // rho, radius
-      randvarn2 = 2.0*TMath::Pi()*G4UniformRand(); // theta, xy angle
-      randvarn3 = 89.9275*(-1.0+2.0*G4UniformRand()); // length of the tank
-      SourcePosition.set( (0.0+0.0*randvarn1*cos(randvarn2)+100.0)*cm, (110.73384+randvarn1*sin(randvarn2))*cm, (-80.74526+randvarn3)*cm  );
-      //SourcePosition.set( (0.0+randvarn1*cos(randvarn2))*cm, (110.73384+randvarn1*sin(randvarn2))*cm, (-80.74526+randvarn3)*cm  );
-      //SourcePosition.set( (0.0+0.0*randvarn1*cos(randvarn2))*cm, (110.73384+0.0*randvarn1*sin(randvarn2))*cm, (-80.74526+89.9275+100)*cm  );
-      G4VPhysicalVolume* volume = Navigator->LocateGlobalPointAndSetup(SourcePosition);
-
-       if(volume->GetName() == "h2oPhysV"
-          || volume->GetName() == "d2oPhysV"
-          || volume->GetName() == "acrylicPhysV"
-          || 1==1
-          ){
-//      if(volume->GetName() == "d2oPhysV"){
-        break;}
-      ntries++;
-
-    //  std::cout << "Sampling gun "  << ntries << std::endl;
-
+    if (fTopBeamMode) {
+        GenerateTopBeamNeutron();
+    } else if (fSideBeamMode) {
+        GenerateSideBeamNeutron();
+    } else if (fVolumeMode) {
+        GenerateVolumeNeutron();
+    } else {
+        G4cout << "WARNING: No beam mode selected! Using volume mode." << G4endl;
+        GenerateVolumeNeutron();
     }
-  
-//    particleGun->SetParticlePosition( {(0.0+randvarn1*cos(randvarn2))*cm, (110.73384+randvarn1*sin(randvarn2))*cm, (-80.74526+randvarn3)*cm} );
-    particleGun->SetParticlePosition( SourcePosition );
- //   particleGun->SetParticleMomentumDirection(G4ThreeVector(0.0, 0.0, -1.0));
-    ctheta = G4UniformRand()*(cthetaRange1-cthetaRange2) + cthetaRange2;
-    phi = 2.0*TMath::Pi()*G4UniformRand();
-    
-    stheta = sqrt( 1 - pow(ctheta,2) );
-    
-    pz = ctheta;
-    py = stheta*cos(phi);
-    px = stheta*sin(phi);
-    
-    
-    //initDir.set(px,py,pz);
-    initDir.set(-1.0,0.0,0.0);
-    
-    particleGun->SetParticleMomentumDirection(initDir);
-    
-    particleGun->GeneratePrimaryVertex(anEvent);
-    
-}//END of GeneratePrimaries()
 
+    particleGun->SetParticlePosition(SourcePosition);
+
+    if (theEventNum < 10) {
+        G4Navigator* Navigator = G4TransportationManager::GetTransportationManager()->GetNavigatorForTracking();
+        G4VPhysicalVolume* volume = Navigator->LocateGlobalPointAndSetup(SourcePosition);
+        G4String volName = volume ? volume->GetName() : "UNKNOWN";
+        G4String matName = volume ? volume->GetLogicalVolume()->GetMaterial()->GetName() : "UNKNOWN";
+
+        G4cout << "Event " << theEventNum;
+        if (fTopBeamMode) G4cout << " (TOP BEAM)";
+        else if (fSideBeamMode) G4cout << " (SIDE BEAM)";
+        else G4cout << " (VOLUME MODE)";
+        G4cout << ": Neutron E = " << sourceEnergy / eV << " eV"
+               << ", Pos = (" << SourcePosition.x() / cm
+               << ", " << SourcePosition.y() / cm
+               << ", " << SourcePosition.z() / cm << ") cm"
+               << ", Volume = " << volName
+               << ", Material = " << matName
+               << G4endl;
+    }
+
+    particleGun->GeneratePrimaryVertex(anEvent);
+}
