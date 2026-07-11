@@ -11,7 +11,19 @@ Makefile
 OUTPUT/
 SIMULATIONLOGS/
 SLURMOUT/
-data/
+
+# Ignore everything in data
+data/*
+
+# But keep notebooks and source code
+!data/*.ipynb
+!data/*.py
+!data/*.cpp
+!data/*.cc
+!data/*.cxx
+!data/*.h
+!data/*.hh
+!data/*.hpp
 
 # ROOT and logs
 *.root
